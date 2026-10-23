@@ -13,6 +13,10 @@ const {
   updateRecord,
   deleteRecord,
   resetToSeed,
+  createSale,
+  updateSale,
+  deleteSale,
+  StockError,
 } = require("./db");
 const {
   todayISO,
@@ -75,6 +79,17 @@ function cleanPayload(key, body, isUpdate) {
     data.status = input.status;
   }
 
+  // Sales must say which inventory item was sold and how many (create only;
+  // they are fixed afterwards so stock stays consistent)
+  if (key === "sales" && !isUpdate) {
+    const item = typeof input.item === "string" ? input.item.trim() : "";
+    if (!item) return { error: "Item sold is required" };
+    const qty = Number(input.qty);
+    if (!Number.isInteger(qty) || qty < 1) return { error: "Quantity must be a whole number of at least 1" };
+    data.item = item;
+    data.qty = qty;
+  }
+
   return { data };
 }
 
@@ -106,9 +121,10 @@ COLLECTIONS.forEach((key) => {
         if (error) return res.status(400).json({ error });
         payload = { ...data, date: todayISO() }; // automatic date
       }
-      const record = await createRecord(key, payload);
+      const record = key === "sales" ? await createSale(payload) : await createRecord(key, payload);
       res.status(201).json(record);
     } catch (err) {
+      if (err instanceof StockError) return res.status(400).json({ error: err.message });
       console.error(err);
       res.status(500).json({ error: "Failed to create record" });
     }
@@ -122,10 +138,13 @@ COLLECTIONS.forEach((key) => {
         if (error) return res.status(400).json({ error });
         payload = data; // date is never overwritten
       }
-      const updated = await updateRecord(key, req.params.id, payload);
+      const updated = key === "sales"
+        ? await updateSale(req.params.id, payload)
+        : await updateRecord(key, req.params.id, payload);
       if (!updated) return res.status(404).json({ error: "Record not found" });
       res.json(updated);
     } catch (err) {
+      if (err instanceof StockError) return res.status(400).json({ error: err.message });
       console.error(err);
       res.status(500).json({ error: "Failed to update record" });
     }
@@ -133,7 +152,7 @@ COLLECTIONS.forEach((key) => {
 
   app.delete(`${base}/:id`, async (req, res) => {
     try {
-      const ok = await deleteRecord(key, req.params.id);
+      const ok = key === "sales" ? await deleteSale(req.params.id) : await deleteRecord(key, req.params.id);
       if (!ok) return res.status(404).json({ error: "Record not found" });
       res.status(204).end();
     } catch (err) {

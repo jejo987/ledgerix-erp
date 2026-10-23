@@ -216,6 +216,91 @@ async function deleteRecord(collectionName, id) {
   return true;
 }
 
+/* ---------------------------------------------------------
+   Sales <-> Inventory integration
+   A sale that is not Cancelled takes its quantity out of the item's stock,
+   and the item's status follows the new quantity. Cancelling or deleting
+   the sale puts the stock back. Each change runs in one Firestore
+   transaction so the sale and the stock can never get out of step.
+--------------------------------------------------------- */
+const LOW_STOCK_LIMIT = 20;
+
+function stockStatus(qty) {
+  if (qty <= 0) return "Out of Stock";
+  if (qty <= LOW_STOCK_LIMIT) return "Low Stock";
+  return "In Stock";
+}
+
+class StockError extends Error {}
+
+function writeStock(t, ref, item, newQty) {
+  t.update(ref, { qty: newQty, status: stockStatus(newQty) });
+}
+
+async function createSale(payload) {
+  // payload: customer, total, status, item (inventory id), qty, date
+  return firestore.runTransaction(async (t) => {
+    const itemRef = firestore.collection("inventory").doc(payload.item);
+    const [itemDoc, counterDoc] = await Promise.all([t.get(itemRef), t.get(COUNTERS_DOC)]);
+    if (!itemDoc.exists) throw new StockError("Selected item does not exist");
+    const item = itemDoc.data();
+    const takesStock = payload.status !== "Cancelled";
+    if (takesStock && payload.qty > item.qty) {
+      throw new StockError(`Only ${item.qty} of ${item.name} in stock`);
+    }
+    const counters = counterDoc.exists ? counterDoc.data() : {};
+    const next = (counters.sales || 0) + 1;
+    const id = `${ID_PREFIXES.sales}-${String(next).padStart(4, "0")}`;
+    const record = { ...payload, itemName: item.name };
+    if (takesStock) writeStock(t, itemRef, item, item.qty - payload.qty);
+    t.set(COUNTERS_DOC, { ...counters, sales: next }, { merge: true });
+    t.set(firestore.collection("sales").doc(id), record);
+    return { id, ...record };
+  });
+}
+
+async function updateSale(id, changes) {
+  return firestore.runTransaction(async (t) => {
+    const ref = firestore.collection("sales").doc(id);
+    const doc = await t.get(ref);
+    if (!doc.exists) return null;
+    const sale = doc.data();
+    if (sale.item && changes.status && changes.status !== sale.status) {
+      const itemRef = firestore.collection("inventory").doc(sale.item);
+      const itemDoc = await t.get(itemRef);
+      if (itemDoc.exists) {
+        const item = itemDoc.data();
+        const wasTaking = sale.status !== "Cancelled";
+        const willTake = changes.status !== "Cancelled";
+        if (wasTaking && !willTake) {
+          writeStock(t, itemRef, item, item.qty + sale.qty);          // cancelled: return stock
+        } else if (!wasTaking && willTake) {
+          if (sale.qty > item.qty) throw new StockError(`Only ${item.qty} of ${item.name} in stock`);
+          writeStock(t, itemRef, item, item.qty - sale.qty);          // re-opened: take stock again
+        }
+      }
+    }
+    t.set(ref, changes, { merge: true });
+    return { id, ...sale, ...changes };
+  });
+}
+
+async function deleteSale(id) {
+  return firestore.runTransaction(async (t) => {
+    const ref = firestore.collection("sales").doc(id);
+    const doc = await t.get(ref);
+    if (!doc.exists) return false;
+    const sale = doc.data();
+    if (sale.item && sale.status !== "Cancelled") {
+      const itemRef = firestore.collection("inventory").doc(sale.item);
+      const itemDoc = await t.get(itemRef);
+      if (itemDoc.exists) writeStock(t, itemRef, itemDoc.data(), itemDoc.data().qty + sale.qty);
+    }
+    t.delete(ref);
+    return true;
+  });
+}
+
 async function resetToSeed() {
   const seed = seedData();
   const collections = Object.keys(seed);
@@ -258,5 +343,9 @@ module.exports = {
   updateRecord,
   deleteRecord,
   resetToSeed,
+  createSale,
+  updateSale,
+  deleteSale,
+  StockError,
   ID_PREFIXES,
 };

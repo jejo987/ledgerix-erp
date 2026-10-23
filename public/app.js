@@ -117,9 +117,11 @@ const MODULE_CONFIG = {
   },
   sales: {
     label: "Order", api: "sales",
-    columns: ["Order ID","Customer","Date","Total","Status"],
+    columns: ["Order ID","Customer","Item","Date","Total","Status"],
     fields: [
       { key:"customer", label:"Customer", type:"text", required:true },
+      { key:"item", label:"Item Sold", type:"item-select", required:true, createOnly:true },
+      { key:"qty", label:"Quantity Sold", type:"number", required:true, min:"1", step:"1", createOnly:true },
       { key:"date", label:"Date (automatic)", type:"auto-date" },
       { key:"total", label:"Total (₱)", type:"number", required:true, min:"0.01", step:"0.01" },
       { key:"status", label:"Status", type:"select", required:true, options:["Pending","Completed","Cancelled"] },
@@ -127,6 +129,7 @@ const MODULE_CONFIG = {
     renderRow: r => `
       <td><span class="mono-chip">${esc(r.id)}</span></td>
       <td class="cell-strong">${esc(r.customer)}</td>
+      <td class="cell-muted">${r.item ? esc(r.itemName || r.item) + " × " + esc(r.qty) : "—"}</td>
       <td class="mono cell-date">${esc(r.date)}</td>
       <td class="mono">${peso(r.total)}</td>
       <td>${badge(r.status)}</td>`,
@@ -264,10 +267,20 @@ function todayLocalISO(){
 function buildModalFields(cfg, values){
   modalFields.innerHTML = cfg.fields.map(f => {
     const val = values[f.key] ?? "";
+    const editing = Boolean(values.id);
+    if(f.createOnly && editing){
+      const shown = f.type === "item-select" ? (values.item ? `${values.itemName || values.item}` : "—") : (val === "" ? "—" : val);
+      return `<div class="field-group"><label>${esc(f.label)}</label><input type="text" value="${esc(shown)}" disabled /><p class="field-hint">Fixed after the sale is recorded</p></div>`;
+    }
     const labelHtml = `<label class="${f.required ? "req" : ""}">${esc(f.label)}</label>`;
     if(f.type === "auto-date"){
       const shown = val || todayLocalISO();
       return `<div class="field-group">${labelHtml}<input type="text" value="${esc(shown)}" disabled /><p class="field-hint">Set automatically when the record is saved</p></div>`;
+    }
+    if(f.type === "item-select"){
+      const opts = `<option value="">Select an item…</option>` + state.inventory.map(i =>
+        `<option value="${esc(i.id)}" ${i.qty <= 0 ? "disabled" : ""}>${esc(i.name)} (${esc(i.qty)} in stock)</option>`).join("");
+      return `<div class="field-group">${labelHtml}<select data-field="${f.key}">${opts}</select><p class="field-hint">Stock is reduced automatically</p></div>`;
     }
     if(f.type === "select"){
       const opts = f.options.map(o => `<option value="${esc(o)}" ${o === val ? "selected" : ""}>${esc(o)}</option>`).join("");
@@ -293,6 +306,7 @@ document.getElementById("modalSaveBtn").onclick = async () => {
 
   for(const f of cfg.fields){
     if(f.type === "auto-date") continue;       // the server sets the date
+    if(f.createOnly && editingId) continue;    // item / quantity are fixed after creation
     const raw = modalFields.querySelector(`[data-field="${f.key}"]`).value;
     const name = f.label.replace(/\s*\(.*\)/, "");
 
@@ -329,6 +343,7 @@ document.getElementById("modalSaveBtn").onclick = async () => {
   }
   closeModal();
   await loadModule(moduleKey);
+  if(moduleKey === "sales") await loadModule("inventory");   // stock changed
   refreshRangeViews();
 };
 
@@ -339,6 +354,7 @@ async function deleteRow(moduleKey, id){
     await apiDelete(`${cfg.api}/${id}`);
     toast(`${cfg.label} deleted`);
     await loadModule(moduleKey);
+    if(moduleKey === "sales") await loadModule("inventory");
     refreshRangeViews();
   } catch (err){
     toast("Delete failed — check the server is running");

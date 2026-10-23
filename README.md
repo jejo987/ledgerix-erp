@@ -169,6 +169,16 @@ Firestore.
   historical data with your one real live month, since the system just
   "launched" — mention this if asked, it's a normal thing to flag in a demo.
 
+## Sales and Inventory are connected (stock deduction)
+
+Recording a sale now needs an **Item Sold** (picked from Inventory) and a **Quantity Sold**. In one Firestore transaction the server:
+
+- subtracts the quantity from the item's stock and updates its status (0 = Out of Stock, 20 or fewer = Low Stock, otherwise In Stock);
+- rejects the sale if there is not enough stock (`400 Only N of <item> in stock`);
+- puts the stock back when the sale is set to **Cancelled** or deleted, and takes it again if a Cancelled sale is re-opened.
+
+Item and quantity are fixed after the sale is saved. Older seed orders have no item, so they do not touch stock.
+
 ## Changes after teacher feedback (October 2026)
 
 | Module | Change |
